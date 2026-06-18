@@ -1,5 +1,6 @@
 import streamlit as st
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from traceloop.sdk import Traceloop
 
 # Streamlit Cloud stores secrets in st.secrets; fall back to env vars for local dev.
@@ -10,7 +11,7 @@ def _secret(key: str, default: str = "") -> str:
     except (KeyError, FileNotFoundError):
         return os.environ.get(key, default)
 
-# Initialize Traceloop once per process — auto-instruments the google-generativeai SDK
+# Initialize Traceloop once per process — auto-instruments the google-genai SDK
 # and exports OTel Gen AI semantic convention spans to the configured OTLP endpoint.
 if "traceloop_initialized" not in st.session_state:
     Traceloop.init(
@@ -24,7 +25,7 @@ if "traceloop_initialized" not in st.session_state:
     )
     st.session_state.traceloop_initialized = True
 
-genai.configure(api_key=_secret("GEMINI_API_KEY"))
+client = genai.Client(api_key=_secret("GEMINI_API_KEY"))
 
 # ── UI ──────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Dash0 LLM Tracing Demo", page_icon="🔭", layout="centered")
@@ -67,27 +68,32 @@ if prompt := st.chat_input("Ask anything…"):
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # Convert history to Google's format (role "assistant" → "model", all but last message)
+    # Build contents list in google-genai format ("assistant" → "model")
     history = [
-        {"role": "model" if m["role"] == "assistant" else "user", "parts": [m["content"]]}
+        types.Content(
+            role="model" if m["role"] == "assistant" else "user",
+            parts=[types.Part(text=m["content"])],
+        )
         for m in st.session_state.messages[:-1]
     ]
-
-    gemini_model = genai.GenerativeModel(
-        model_name=model_name,
-        system_instruction=system_prompt,
-        generation_config=genai.GenerationConfig(max_output_tokens=max_tokens),
-    )
-    chat = gemini_model.start_chat(history=history)
+    history.append(types.Content(role="user", parts=[types.Part(text=prompt)]))
 
     with st.chat_message("assistant"):
         placeholder = st.empty()
         full_response = ""
 
         # Streaming call — Traceloop intercepts and emits OTel spans automatically
-        for chunk in chat.send_message(prompt, stream=True):
-            full_response += chunk.text
-            placeholder.markdown(full_response + "▌")
+        for chunk in client.models.generate_content_stream(
+            model=model_name,
+            contents=history,
+            config=types.GenerateContentConfig(
+                system_instruction=system_prompt,
+                max_output_tokens=max_tokens,
+            ),
+        ):
+            if chunk.text:
+                full_response += chunk.text
+                placeholder.markdown(full_response + "▌")
 
         placeholder.markdown(full_response)
 
