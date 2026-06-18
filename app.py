@@ -1,6 +1,5 @@
 import streamlit as st
-from google import genai
-from google.genai import types
+from groq import Groq
 from traceloop.sdk import Traceloop
 
 # Streamlit Cloud stores secrets in st.secrets; fall back to env vars for local dev.
@@ -11,7 +10,7 @@ def _secret(key: str, default: str = "") -> str:
     except (KeyError, FileNotFoundError):
         return os.environ.get(key, default)
 
-# Initialize Traceloop once per process — auto-instruments the google-genai SDK
+# Initialize Traceloop once per process — auto-instruments the Groq SDK
 # and exports OTel Gen AI semantic convention spans to the configured OTLP endpoint.
 if "traceloop_initialized" not in st.session_state:
     Traceloop.init(
@@ -25,7 +24,7 @@ if "traceloop_initialized" not in st.session_state:
     )
     st.session_state.traceloop_initialized = True
 
-client = genai.Client(api_key=_secret("GEMINI_API_KEY"))
+client = Groq(api_key=_secret("GROQ_API_KEY"))
 
 # ── UI ──────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Dash0 LLM Tracing Demo", page_icon="🔭", layout="centered")
@@ -37,9 +36,9 @@ st.caption(
 )
 
 MODEL_OPTIONS = {
-    "Gemini 2.0 Flash Lite (cheapest)": "gemini-2.0-flash-lite",
-    "Gemini 2.0 Flash": "gemini-2.0-flash",
-    "Gemini 1.5 Flash-8B": "gemini-1.5-flash-8b",
+    "Llama 3.1 8B Instant (fastest)": "llama-3.1-8b-instant",
+    "Llama 3.3 70B Versatile": "llama-3.3-70b-versatile",
+    "Gemma 2 9B": "gemma2-9b-it",
 }
 selected_label = st.sidebar.selectbox("Model", list(MODEL_OPTIONS.keys()))
 model_name = MODEL_OPTIONS[selected_label]
@@ -55,7 +54,7 @@ max_tokens = st.sidebar.slider("Max tokens", 64, 2048, 512, 64)
 st.sidebar.divider()
 st.sidebar.markdown("**Traces appear in your Dash0 dashboard in real time.**")
 
-# Chat history (Streamlit format: role = "user" | "assistant")
+# Chat history
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
@@ -68,31 +67,20 @@ if prompt := st.chat_input("Ask anything…"):
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # Build contents list in google-genai format ("assistant" → "model")
-    history = [
-        types.Content(
-            role="model" if m["role"] == "assistant" else "user",
-            parts=[types.Part(text=m["content"])],
-        )
-        for m in st.session_state.messages[:-1]
-    ]
-    history.append(types.Content(role="user", parts=[types.Part(text=prompt)]))
-
     with st.chat_message("assistant"):
         placeholder = st.empty()
         full_response = ""
 
         # Streaming call — Traceloop intercepts and emits OTel spans automatically
-        for chunk in client.models.generate_content_stream(
+        with client.chat.completions.create(
             model=model_name,
-            contents=history,
-            config=types.GenerateContentConfig(
-                system_instruction=system_prompt,
-                max_output_tokens=max_tokens,
-            ),
-        ):
-            if chunk.text:
-                full_response += chunk.text
+            messages=[{"role": "system", "content": system_prompt}] + st.session_state.messages,
+            max_tokens=max_tokens,
+            stream=True,
+        ) as stream:
+            for chunk in stream:
+                delta = chunk.choices[0].delta.content or ""
+                full_response += delta
                 placeholder.markdown(full_response + "▌")
 
         placeholder.markdown(full_response)
