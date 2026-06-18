@@ -72,16 +72,16 @@ if prompt := st.chat_input("Ask anything…"):
         full_response = ""
 
         # Streaming call — Traceloop intercepts and emits OTel spans automatically
-        with client.chat.completions.create(
+        stream = client.chat.completions.create(
             model=model_name,
             messages=[{"role": "system", "content": system_prompt}] + st.session_state.messages,
             max_tokens=max_tokens,
             stream=True,
-        ) as stream:
-            for chunk in stream:
-                delta = chunk.choices[0].delta.content or ""
-                full_response += delta
-                placeholder.markdown(full_response + "▌")
+        )
+        for chunk in stream:
+            delta = chunk.choices[0].delta.content or ""
+            full_response += delta
+            placeholder.markdown(full_response + "▌")
 
         placeholder.markdown(full_response)
 
