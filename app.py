@@ -1,3 +1,4 @@
+import json
 import logging
 import streamlit as st
 from groq import Groq
@@ -113,6 +114,14 @@ if prompt := st.chat_input("Ask anything…"):
             span.set_attribute("gen_ai.request.max_tokens", max_tokens)
             span.set_attribute("server.address", "api.groq.com")
             span.set_attribute("server.port", 443)
+
+            # ── Input attributes ─────────────────────────────────────────────
+            span.set_attribute("gen_ai.system_instructions", system_prompt)
+            input_messages = [
+                {"role": m["role"], "content": m["content"]}
+                for m in st.session_state.messages
+            ]
+            span.set_attribute("gen_ai.input.messages", json.dumps(input_messages))
 
             # ── Input message events ─────────────────────────────────────────
             span.add_event("gen_ai.system.message", {"content": system_prompt})
