@@ -12,6 +12,9 @@ from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
 from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
 from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
 from opentelemetry.trace import SpanKind, StatusCode
+# Events API — each Gen AI message becomes a correlated LogRecord with event.name set
+from opentelemetry._events import get_event_logger, Event, set_event_logger_provider
+from opentelemetry.sdk._events import EventLoggerProvider
 
 
 def _secret(key: str, default: str = "") -> str:
@@ -40,12 +43,21 @@ def _setup_otel() -> None:
     ))
     trace.set_tracer_provider(tp)
 
-    # ── Logs (correlated to traces via trace_id / span_id) ──────────────────
+    # ── Logs + Events ────────────────────────────────────────────────────────
+    # LoggerProvider feeds both the Python logging bridge (for app logs)
+    # and the EventLoggerProvider (for Gen AI message timeline events).
     lp = LoggerProvider(resource=resource)
     lp.add_log_record_processor(BatchLogRecordProcessor(
         OTLPLogExporter(endpoint=f"{endpoint}/v1/logs", headers=headers)
     ))
     set_logger_provider(lp)
+
+    # EventLoggerProvider wraps the same LoggerProvider — emitting an Event
+    # produces a LogRecord with event.name set and trace_id/span_id from the
+    # active span context, which Dash0 surfaces in the Gen AI timeline view.
+    set_event_logger_provider(EventLoggerProvider(logger_provider=lp))
+
+    # Bridge Python stdlib logging → OTel logs
     root = logging.getLogger()
     root.addHandler(LoggingHandler(logger_provider=lp))
     root.setLevel(logging.INFO)
@@ -56,6 +68,7 @@ if not isinstance(trace.get_tracer_provider(), TracerProvider):
     _setup_otel()
 
 tracer = trace.get_tracer("dash0-llm-demo", "1.0.0")
+event_logger = get_event_logger("dash0-llm-demo", "1.0.0")
 logger = logging.getLogger("dash0.llm.demo")
 client = Groq(api_key=_secret("GROQ_API_KEY"))
 
@@ -114,8 +127,6 @@ if prompt := st.chat_input("Ask anything…"):
             span.set_attribute("gen_ai.request.max_tokens", max_tokens)
             span.set_attribute("server.address", "api.groq.com")
             span.set_attribute("server.port", 443)
-
-            # ── Input attributes ─────────────────────────────────────────────
             span.set_attribute("gen_ai.system_instructions", system_prompt)
             input_messages = [
                 {"role": m["role"], "content": m["content"]}
@@ -123,12 +134,22 @@ if prompt := st.chat_input("Ask anything…"):
             ]
             span.set_attribute("gen_ai.input.messages", json.dumps(input_messages))
 
-            # ── Input message events ─────────────────────────────────────────
-            span.add_event("gen_ai.system.message", {"content": system_prompt})
+            # ── Input events → correlated LogRecords with event.name ─────────
+            # These are emitted inside the active span so trace_id/span_id are
+            # automatically attached, giving Dash0 the per-message timeline.
+            event_logger.emit(Event(
+                name="gen_ai.system.message",
+                body={"content": system_prompt},
+            ))
             for msg in st.session_state.messages[:-1]:
-                event = "gen_ai.user.message" if msg["role"] == "user" else "gen_ai.assistant.message"
-                span.add_event(event, {"content": msg["content"]})
-            span.add_event("gen_ai.user.message", {"content": prompt})
+                event_logger.emit(Event(
+                    name="gen_ai.user.message" if msg["role"] == "user" else "gen_ai.assistant.message",
+                    body={"content": msg["content"]},
+                ))
+            event_logger.emit(Event(
+                name="gen_ai.user.message",
+                body={"content": prompt},
+            ))
 
             try:
                 stream = client.chat.completions.create(
@@ -164,15 +185,16 @@ if prompt := st.chat_input("Ask anything…"):
                 span.set_attribute("gen_ai.usage.input_tokens", input_tokens)
                 span.set_attribute("gen_ai.usage.output_tokens", output_tokens)
 
-                # ── Choice event ─────────────────────────────────────────────
-                span.add_event("gen_ai.choice", {
-                    "index": 0,
-                    "finish_reason": finish_reason,
-                    "message.role": "assistant",
-                    "message.content": full_response,
-                })
+                # ── Choice event → correlated LogRecord ──────────────────────
+                event_logger.emit(Event(
+                    name="gen_ai.choice",
+                    body={
+                        "index": 0,
+                        "finish_reason": finish_reason,
+                        "message": {"role": "assistant", "content": full_response},
+                    },
+                ))
 
-                # ── Correlated log ───────────────────────────────────────────
                 logger.info(
                     "chat completion",
                     extra={
