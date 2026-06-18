@@ -128,7 +128,6 @@ if prompt := st.chat_input("Ask anything…"):
                     + st.session_state.messages,
                     max_tokens=max_tokens,
                     stream=True,
-                    stream_options={"include_usage": True},
                 )
 
                 input_tokens = output_tokens = 0
